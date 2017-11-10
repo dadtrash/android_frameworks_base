@@ -3518,13 +3518,6 @@ public class WindowManagerService extends IWindowManager.Stub
                 return;
             }
 
-            // Don't enable the screen until all existing windows have been drawn.
-            if (!mForceDisplayEnabled
-                    // TODO(multidisplay): Expand to all displays?
-                    && getDefaultDisplayContentLocked().checkWaitingForWindows()) {
-                return;
-            }
-
             if (!mBootAnimationStopped) {
                 Trace.asyncTraceBegin(TRACE_TAG_WINDOW_MANAGER, "Stop bootanim", 0);
                 // stop boot animation
@@ -3532,6 +3525,13 @@ public class WindowManagerService extends IWindowManager.Stub
                 // can choose where to stop the animation.
                 SystemProperties.set("service.bootanim.exit", "1");
                 mBootAnimationStopped = true;
+            }
+
+            // Don't enable the screen until all existing windows have been drawn.
+            if (!mForceDisplayEnabled
+                    // TODO(multidisplay): Expand to all displays?
+                    && getDefaultDisplayContentLocked().checkWaitingForWindows()) {
+                return;
             }
 
             if (!mForceDisplayEnabled && !checkBootAnimationCompleteLocked()) {
