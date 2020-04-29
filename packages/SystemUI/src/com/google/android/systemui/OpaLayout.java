@@ -3,21 +3,21 @@ package com.google.android.systemui;
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.ArgbEvaluator;
+import android.animation.ObjectAnimator;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.graphics.Color;
 import android.database.ContentObserver;
 import android.graphics.drawable.Drawable;
+import android.graphics.PorterDuff;
 import android.net.Uri;
 import android.os.Handler;
-import android.os.Message;
 import android.os.SystemClock;
-import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.os.UserManager;
 import android.provider.Settings;
 import android.util.ArraySet;
 import android.util.AttributeSet;
-import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
@@ -29,13 +29,11 @@ import android.widget.ImageView;
 
 import com.android.systemui.Interpolators;
 import com.android.systemui.R;
-import com.android.systemui.statusbar.phone.ButtonDispatcher;
-import com.android.systemui.plugins.statusbar.phone.NavBarButtonProvider;
+import com.android.systemui.plugins.statusbar.phone.NavBarButtonProvider.ButtonInterface;
 import com.android.systemui.statusbar.policy.KeyButtonView;
+import com.android.settingslib.Utils;
 
-public class OpaLayout extends FrameLayout implements NavBarButtonProvider.ButtonInterface{
-
-    static final String TAG = "OpaLayout";
+public class OpaLayout extends FrameLayout implements ButtonInterface{
 
     private static final int ANIMATION_STATE_NONE = 0;
     private static final int ANIMATION_STATE_DIAMOND = 1;
@@ -50,6 +48,8 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
     private static final int RETRACT_ANIMATION_DURATION = 300;
     private static final int DIAMOND_ANIMATION_DURATION = 200;
     private static final int HALO_ANIMATION_DURATION = 100;
+    private static final int OPA_FADE_IN_DURATION = 50;
+    private static final int OPA_FADE_OUT_DURATION = 250;
 
     private static final int DOTS_RESIZE_DURATION = 200;
     private static final int HOME_RESIZE_DURATION = 83;
@@ -66,7 +66,7 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
     private int mAnimationState;
     private final ArraySet<Animator> mCurrentAnimators;
 
-    private boolean mIsLandscape;
+    private boolean mVertical;
     private boolean mIsPressed;
     private boolean mLongClicked;
     private boolean mOpaEnabled;
@@ -76,8 +76,12 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
     private View mBlue;
     private View mGreen;
     private View mYellow;
-    private View mWhite;
-    private View mHalo;
+    private ImageView mWhite;
+//    private View mHalo;
+
+    private int mDarkModeFillColor;
+    private int mLightModeFillColor;
+    private int mIconTint = Color.WHITE;
 
     private View mTop;
     private View mRight;
@@ -94,25 +98,32 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
     private final Interpolator mFastOutSlowInInterpolator;
     private final Interpolator mHomeDisappearInterpolator;
 
-    private float mOldDarkIntensity;
-    private int mDarkModeFillColor;
-    private int mLightModeFillColor;
+    private SettingsObserver mSettingsObserver;
+
+    protected class SettingsObserver extends ContentObserver {
+        SettingsObserver(Handler handler) {
+            super(handler);
+        }
+
+        void observe() {
+           ContentResolver resolver = mContext.getContentResolver();
+           resolver.registerContentObserver(Settings.System.getUriFor(
+                  Settings.System.PIXEL_NAV_ANIMATION),
+                  false, this, UserHandle.USER_CURRENT);
+        }
+
+        @Override
+        public void onChange(boolean selfChange, Uri uri) {
+           super.onChange(selfChange, uri);
+           setOpaEnabled(true);
+        }
+
+    }
 
     public OpaLayout(Context context) {
-        this(context, null);
-    }
-
-    public OpaLayout(Context context, AttributeSet attrs) {
-        this(context, attrs, 0);
-    }
-
-    public OpaLayout(Context context, AttributeSet attrs, int defStyleAttr) {
-        this(context, attrs, defStyleAttr, 0);
-    }
-
-    public OpaLayout(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
-        super(context, attrs, defStyleAttr, defStyleRes);
-
+        super(context);
+        mDarkModeFillColor = context.getColor(android.R.color.black);
+        mLightModeFillColor = context.getColor(android.R.color.white);
         mFastOutSlowInInterpolator = Interpolators.FAST_OUT_SLOW_IN;
         mHomeDisappearInterpolator = new PathInterpolator(0.8f, 0f, 1f, 1f);
         mCollapseInterpolator = Interpolators.FAST_OUT_LINEAR_IN;
@@ -122,26 +133,136 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
         mCheckLongPress = new Runnable() {
             @Override
             public void run() {
-                if (mIsPressed) {
-                    mLongClicked = true;
+                if (OpaLayout.this.mIsPressed) {
+                    OpaLayout.this.mLongClicked = true;
                 }
             }
         };
         mRetract = new Runnable() {
             @Override
             public void run() {
-                cancelCurrentAnimation();
-                startRetractAnimation();
+                OpaLayout.this.cancelCurrentAnimation();
+                OpaLayout.this.startRetractAnimation();
+                hideAllOpa();
             }
         };
-        mAnimationState = ANIMATION_STATE_NONE;
+        mAnimationState = OpaLayout.ANIMATION_STATE_NONE;
         mCurrentAnimators = new ArraySet<Animator>();
-        mDarkModeFillColor = context.getColor(R.color.dark_nav_bar);
-        mLightModeFillColor = context.getColor(R.color.light_mode_icon_color_single_tone);
+
+        if (mSettingsObserver == null) {
+            mSettingsObserver = new SettingsObserver(new Handler());
+        }
+        mSettingsObserver.observe();
+    }
+
+    public OpaLayout(Context context, AttributeSet attrs) {
+        super(context, attrs);
+        mDarkModeFillColor = context.getColor(android.R.color.black);
+        mLightModeFillColor = context.getColor(android.R.color.white);
+        mFastOutSlowInInterpolator = Interpolators.FAST_OUT_SLOW_IN;
+        mHomeDisappearInterpolator = new PathInterpolator(0.8f, 0f, 1f, 1f);
+        mCollapseInterpolator = Interpolators.FAST_OUT_LINEAR_IN;
+        mDotsFullSizeInterpolator = new PathInterpolator(0.4f, 0f, 0f, 1f);
+        mRetractInterpolator = new PathInterpolator(0.4f, 0f, 0f, 1f);
+        mDiamondInterpolator = new PathInterpolator(0.2f, 0f, 0.2f, 1f);
+        mCheckLongPress = new Runnable() {
+            @Override
+            public void run() {
+                if (OpaLayout.this.mIsPressed) {
+                    OpaLayout.this.mLongClicked = true;
+                }
+            }
+        };
+        mRetract = new Runnable() {
+            @Override
+            public void run() {
+                OpaLayout.this.cancelCurrentAnimation();
+                OpaLayout.this.startRetractAnimation();
+                hideAllOpa();
+            }
+        };
+        mAnimationState = OpaLayout.ANIMATION_STATE_NONE;
+        mCurrentAnimators = new ArraySet<Animator>();
+
+        if (mSettingsObserver == null) {
+            mSettingsObserver = new SettingsObserver(new Handler());
+        }
+        mSettingsObserver.observe();
+    }
+
+    public OpaLayout(Context context, AttributeSet attrs, int defStyleAttr) {
+        super(context, attrs, defStyleAttr);
+        mDarkModeFillColor = context.getColor(android.R.color.black);
+        mLightModeFillColor = context.getColor(android.R.color.white);
+        mFastOutSlowInInterpolator = Interpolators.FAST_OUT_SLOW_IN;
+        mHomeDisappearInterpolator = new PathInterpolator(0.8f, 0f, 1f, 1f);
+        mCollapseInterpolator = Interpolators.FAST_OUT_LINEAR_IN;
+        mDotsFullSizeInterpolator = new PathInterpolator(0.4f, 0f, 0f, 1f);
+        mRetractInterpolator = new PathInterpolator(0.4f, 0f, 0f, 1f);
+        mDiamondInterpolator = new PathInterpolator(0.2f, 0f, 0.2f, 1f);
+        mCheckLongPress = new Runnable() {
+            @Override
+            public void run() {
+                if (OpaLayout.this.mIsPressed) {
+                    OpaLayout.this.mLongClicked = true;
+                }
+            }
+        };
+        mRetract = new Runnable() {
+            @Override
+            public void run() {
+                OpaLayout.this.cancelCurrentAnimation();
+                OpaLayout.this.startRetractAnimation();
+                hideAllOpa();
+            }
+        };
+        mAnimationState = OpaLayout.ANIMATION_STATE_NONE;
+        mCurrentAnimators = new ArraySet<Animator>();
+
+        if (mSettingsObserver == null) {
+            mSettingsObserver = new SettingsObserver(new Handler());
+        }
+        mSettingsObserver.observe();
+    }
+
+    public OpaLayout(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+        mDarkModeFillColor = context.getColor(android.R.color.black);
+        mLightModeFillColor = context.getColor(android.R.color.white);
+        mFastOutSlowInInterpolator = Interpolators.FAST_OUT_SLOW_IN;
+        mHomeDisappearInterpolator = new PathInterpolator(0.8f, 0f, 1f, 1f);
+        mCollapseInterpolator = Interpolators.FAST_OUT_LINEAR_IN;
+        mDotsFullSizeInterpolator = new PathInterpolator(0.4f, 0f, 0f, 1f);
+        mRetractInterpolator = new PathInterpolator(0.4f, 0f, 0f, 1f);
+        mDiamondInterpolator = new PathInterpolator(0.2f, 0f, 0.2f, 1f);
+        mCheckLongPress = new Runnable() {
+            @Override
+            public void run() {
+                if (OpaLayout.this.mIsPressed) {
+                    OpaLayout.this.mLongClicked = true;
+                }
+            }
+        };
+        mRetract = new Runnable() {
+            @Override
+            public void run() {
+                OpaLayout.this.cancelCurrentAnimation();
+                OpaLayout.this.startRetractAnimation();
+                hideAllOpa();
+            }
+        };
+        mAnimationState = OpaLayout.ANIMATION_STATE_NONE;
+        mCurrentAnimators = new ArraySet<Animator>();
+
+        if (mSettingsObserver == null) {
+            mSettingsObserver = new SettingsObserver(new Handler());
+        }
+        mSettingsObserver.observe();
     }
 
     private void startAll(ArraySet<Animator> animators) {
-        for(int i = 0; i < animators.size(); i++) {
+        showAllOpa();
+        for(int i=0; i < animators.size(); i++) {
             Animator curAnim = (Animator) mCurrentAnimators.valueAt(i);
             curAnim.start();
         }
@@ -150,108 +271,110 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
     private void startCollapseAnimation() {
         mCurrentAnimators.clear();
         mCurrentAnimators.addAll(getCollapseAnimatorSet());
-        mAnimationState = ANIMATION_STATE_OTHER;
+        mAnimationState = OpaLayout.ANIMATION_STATE_OTHER;
         startAll(mCurrentAnimators);
     }
 
     private void startDiamondAnimation() {
         mCurrentAnimators.clear();
         mCurrentAnimators.addAll(getDiamondAnimatorSet());
-        mAnimationState = ANIMATION_STATE_DIAMOND;
+        mAnimationState = OpaLayout.ANIMATION_STATE_DIAMOND;
         startAll(mCurrentAnimators);
     }
 
     private void startLineAnimation() {
         mCurrentAnimators.clear();
         mCurrentAnimators.addAll(getLineAnimatorSet());
-        mAnimationState = ANIMATION_STATE_OTHER;
+        mAnimationState = OpaLayout.ANIMATION_STATE_OTHER;
         startAll(mCurrentAnimators);
     }
 
     private void startRetractAnimation() {
         mCurrentAnimators.clear();
         mCurrentAnimators.addAll(getRetractAnimatorSet());
-        mAnimationState = ANIMATION_STATE_RETRACT;
+        mAnimationState = OpaLayout.ANIMATION_STATE_RETRACT;
         startAll(mCurrentAnimators);
     }
 
     private void cancelCurrentAnimation() {
-        if (mCurrentAnimators.isEmpty()) return;
-        for (int i = 0; i < mCurrentAnimators.size(); i++) {
+        if(mCurrentAnimators.isEmpty())
+            return;
+        for(int i=0; i < mCurrentAnimators.size(); i++) {
             Animator curAnim = (Animator) mCurrentAnimators.valueAt(i);
             curAnim.removeAllListeners();
             curAnim.cancel();
         }
         mCurrentAnimators.clear();
-        mAnimationState = ANIMATION_STATE_NONE;
+        mAnimationState = OpaLayout.ANIMATION_STATE_NONE;
     }
 
     private void endCurrentAnimation() {
-        if (mCurrentAnimators.isEmpty()) return;
-        for(int i = 0; i < mCurrentAnimators.size(); i++) {
+        if(mCurrentAnimators.isEmpty())
+            return;
+        for(int i=0; i < mCurrentAnimators.size(); i++) {
             Animator curAnim = (Animator) mCurrentAnimators.valueAt(i);
             curAnim.removeAllListeners();
             curAnim.end();
         }
         mCurrentAnimators.clear();
-        mAnimationState = ANIMATION_STATE_NONE;
+        mAnimationState = OpaLayout.ANIMATION_STATE_NONE;
     }
 
     private ArraySet<Animator> getCollapseAnimatorSet() {
         final ArraySet<Animator> set = new ArraySet<Animator>();
         Animator animator;
-        if (mIsLandscape) {
-            animator = getDeltaAnimatorY(mRed, mCollapseInterpolator, -getPxVal(R.dimen.opa_line_x_collapse_ry), COLLAPSE_ANIMATION_DURATION_RY);
+        if (mVertical) {
+            animator = getDeltaAnimatorY(mRed, mCollapseInterpolator, -getPxVal(R.dimen.opa_line_x_collapse_ry), OpaLayout.COLLAPSE_ANIMATION_DURATION_RY);
         } else {
-            animator = getDeltaAnimatorX(mRed, mCollapseInterpolator, getPxVal(R.dimen.opa_line_x_collapse_ry), COLLAPSE_ANIMATION_DURATION_RY);
+            animator = getDeltaAnimatorX(mRed, mCollapseInterpolator, getPxVal(R.dimen.opa_line_x_collapse_ry), OpaLayout.COLLAPSE_ANIMATION_DURATION_RY);
         }
         set.add(animator);
-        set.add(getScaleAnimatorX(mRed, 1.0f, DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
-        set.add(getScaleAnimatorY(mRed, 1.0f, DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
+        set.add(getScaleAnimatorX(mRed, 1.0f, OpaLayout.DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
+        set.add(getScaleAnimatorY(mRed, 1.0f, OpaLayout.DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
         Animator animator2;
-        if (mIsLandscape) {
-            animator2 = getDeltaAnimatorY(mBlue, mCollapseInterpolator, -getPxVal(R.dimen.opa_line_x_collapse_bg), COLLAPSE_ANIMATION_DURATION_BG);
+        if (mVertical) {
+            animator2 = getDeltaAnimatorY(mBlue, mCollapseInterpolator, -getPxVal(R.dimen.opa_line_x_collapse_bg), OpaLayout.COLLAPSE_ANIMATION_DURATION_BG);
         } else {
-            animator2 = getDeltaAnimatorX(mBlue, mCollapseInterpolator, getPxVal(R.dimen.opa_line_x_collapse_bg), COLLAPSE_ANIMATION_DURATION_BG);
+            animator2 = getDeltaAnimatorX(mBlue, mCollapseInterpolator, getPxVal(R.dimen.opa_line_x_collapse_bg), OpaLayout.COLLAPSE_ANIMATION_DURATION_BG);
         }
         set.add(animator2);
-        set.add(getScaleAnimatorX(mBlue, 1.0f, DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
-        set.add(getScaleAnimatorY(mBlue, 1.0f, DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
+        set.add(getScaleAnimatorX(mBlue, 1.0f, OpaLayout.DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
+        set.add(getScaleAnimatorY(mBlue, 1.0f, OpaLayout.DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
         Animator animator3;
-        if (mIsLandscape) {
-            animator3 = getDeltaAnimatorY(mYellow, mCollapseInterpolator, getPxVal(R.dimen.opa_line_x_collapse_ry), COLLAPSE_ANIMATION_DURATION_RY);
+        if (mVertical) {
+            animator3 = getDeltaAnimatorY(mYellow, mCollapseInterpolator, getPxVal(R.dimen.opa_line_x_collapse_ry), OpaLayout.COLLAPSE_ANIMATION_DURATION_RY);
         } else {
-            animator3 = getDeltaAnimatorX(mYellow, mCollapseInterpolator, -getPxVal(R.dimen.opa_line_x_collapse_ry), COLLAPSE_ANIMATION_DURATION_RY);
+            animator3 = getDeltaAnimatorX(mYellow, mCollapseInterpolator, -getPxVal(R.dimen.opa_line_x_collapse_ry), OpaLayout.COLLAPSE_ANIMATION_DURATION_RY);
         }
         set.add(animator3);
-        set.add(getScaleAnimatorX(mYellow, 1.0f, DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
-        set.add(getScaleAnimatorY(mYellow, 1.0f, DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
+        set.add(getScaleAnimatorX(mYellow, 1.0f, OpaLayout.DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
+        set.add(getScaleAnimatorY(mYellow, 1.0f, OpaLayout.DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
         Animator animator4;
-        if (mIsLandscape) {
-            animator4 = getDeltaAnimatorY(mGreen, mCollapseInterpolator, getPxVal(R.dimen.opa_line_x_collapse_bg), COLLAPSE_ANIMATION_DURATION_BG);
+        if (mVertical) {
+            animator4 = getDeltaAnimatorY(mGreen, mCollapseInterpolator, getPxVal(R.dimen.opa_line_x_collapse_bg), OpaLayout.COLLAPSE_ANIMATION_DURATION_BG);
         } else {
-            animator4 = getDeltaAnimatorX(mGreen, mCollapseInterpolator, -getPxVal(R.dimen.opa_line_x_collapse_bg), COLLAPSE_ANIMATION_DURATION_BG);
+            animator4 = getDeltaAnimatorX(mGreen, mCollapseInterpolator, -getPxVal(R.dimen.opa_line_x_collapse_bg), OpaLayout.COLLAPSE_ANIMATION_DURATION_BG);
         }
         set.add(animator4);
-        set.add(getScaleAnimatorX(mGreen, 1.0f, DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
-        set.add(getScaleAnimatorY(mGreen, 1.0f, DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
-        final Animator scaleAnimatorX = getScaleAnimatorX(mWhite, 1.0f, HOME_REAPPEAR_DURATION, mFastOutSlowInInterpolator);
-        final Animator scaleAnimatorY = getScaleAnimatorY(mWhite, 1.0f, HOME_REAPPEAR_DURATION, mFastOutSlowInInterpolator);
-        final Animator scaleAnimatorX2 = getScaleAnimatorX(mHalo, 1.0f, HOME_REAPPEAR_DURATION, mFastOutSlowInInterpolator);
-        final Animator scaleAnimatorY2 = getScaleAnimatorY(mHalo, 1.0f, HOME_REAPPEAR_DURATION, mFastOutSlowInInterpolator);
-        scaleAnimatorX.setStartDelay(HOME_REAPPEAR_ANIMATION_OFFSET);
-        scaleAnimatorY.setStartDelay(HOME_REAPPEAR_ANIMATION_OFFSET);
-        scaleAnimatorX2.setStartDelay(HOME_REAPPEAR_ANIMATION_OFFSET);
-        scaleAnimatorY2.setStartDelay(HOME_REAPPEAR_ANIMATION_OFFSET);
+        set.add(getScaleAnimatorX(mGreen, 1.0f, OpaLayout.DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
+        set.add(getScaleAnimatorY(mGreen, 1.0f, OpaLayout.DOTS_RESIZE_DURATION, mDotsFullSizeInterpolator));
+        final Animator scaleAnimatorX = getScaleAnimatorX(mWhite, 1.0f, OpaLayout.HOME_REAPPEAR_DURATION, mFastOutSlowInInterpolator);
+        final Animator scaleAnimatorY = getScaleAnimatorY(mWhite, 1.0f, OpaLayout.HOME_REAPPEAR_DURATION, mFastOutSlowInInterpolator);
+//        final Animator scaleAnimatorX2 = getScaleAnimatorX(mHalo, 1.0f, OpaLayout.HOME_REAPPEAR_DURATION, mFastOutSlowInInterpolator);
+//        final Animator scaleAnimatorY2 = getScaleAnimatorY(mHalo, 1.0f, OpaLayout.HOME_REAPPEAR_DURATION, mFastOutSlowInInterpolator);
+        scaleAnimatorX.setStartDelay(OpaLayout.HOME_REAPPEAR_ANIMATION_OFFSET);
+        scaleAnimatorY.setStartDelay(OpaLayout.HOME_REAPPEAR_ANIMATION_OFFSET);
+//        scaleAnimatorX2.setStartDelay(OpaLayout.HOME_REAPPEAR_ANIMATION_OFFSET);
+//        scaleAnimatorY2.setStartDelay(OpaLayout.HOME_REAPPEAR_ANIMATION_OFFSET);
         set.add(scaleAnimatorX);
         set.add(scaleAnimatorY);
-        set.add(scaleAnimatorX2);
-        set.add(scaleAnimatorY2);
-        getLongestAnim(set).addListener(new AnimatorListenerAdapter() {
-            @Override
+//        set.add(scaleAnimatorX2);
+//        set.add(scaleAnimatorY2);
+        getLongestAnim((set)).addListener((Animator.AnimatorListener)new AnimatorListenerAdapter() {
             public void onAnimationEnd(final Animator animator) {
-                mCurrentAnimators.clear();
-                mAnimationState = ANIMATION_STATE_NONE;
+                OpaLayout.this.mCurrentAnimators.clear();
+                OpaLayout.this.mAnimationState = OpaLayout.ANIMATION_STATE_NONE;
+                hideAllOpa();
             }
         });
         return set;
@@ -259,31 +382,29 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
 
     private ArraySet<Animator> getDiamondAnimatorSet() {
         final ArraySet<Animator> set = new ArraySet<Animator>();
-        set.add(getDeltaAnimatorY(mTop, mDiamondInterpolator, -getPxVal(R.dimen.opa_diamond_translation), DIAMOND_ANIMATION_DURATION));
-        set.add(getScaleAnimatorX(mTop, DIAMOND_DOTS_SCALE_FACTOR, DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        set.add(getScaleAnimatorY(mTop, DIAMOND_DOTS_SCALE_FACTOR, DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        set.add(getDeltaAnimatorY(mBottom, mDiamondInterpolator, getPxVal(R.dimen.opa_diamond_translation), DIAMOND_ANIMATION_DURATION));
-        set.add(getScaleAnimatorX(mBottom, DIAMOND_DOTS_SCALE_FACTOR, DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        set.add(getScaleAnimatorY(mBottom, DIAMOND_DOTS_SCALE_FACTOR, DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        set.add(getDeltaAnimatorX(mLeft, mDiamondInterpolator, -getPxVal(R.dimen.opa_diamond_translation), DIAMOND_ANIMATION_DURATION));
-        set.add(getScaleAnimatorX(mLeft, DIAMOND_DOTS_SCALE_FACTOR, DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        set.add(getScaleAnimatorY(mLeft, DIAMOND_DOTS_SCALE_FACTOR, DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        set.add(getDeltaAnimatorX(mRight, mDiamondInterpolator, getPxVal(R.dimen.opa_diamond_translation), DIAMOND_ANIMATION_DURATION));
-        set.add(getScaleAnimatorX(mRight, DIAMOND_DOTS_SCALE_FACTOR, DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        set.add(getScaleAnimatorY(mRight, DIAMOND_DOTS_SCALE_FACTOR, DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        set.add(getScaleAnimatorX(mWhite, DIAMOND_HOME_SCALE_FACTOR, DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        set.add(getScaleAnimatorY(mWhite, DIAMOND_HOME_SCALE_FACTOR, DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        set.add(getScaleAnimatorX(mHalo, HALO_SCALE_FACTOR, MIN_DIAMOND_DURATION, mFastOutSlowInInterpolator));
-        set.add(getScaleAnimatorY(mHalo, HALO_SCALE_FACTOR, MIN_DIAMOND_DURATION, mFastOutSlowInInterpolator));
-        getLongestAnim(set).addListener(new AnimatorListenerAdapter() {
-            @Override
+        set.add(getDeltaAnimatorY(mTop, mDiamondInterpolator, -getPxVal(R.dimen.opa_diamond_translation), OpaLayout.DIAMOND_ANIMATION_DURATION));
+        set.add(getScaleAnimatorX(mTop, OpaLayout.DIAMOND_DOTS_SCALE_FACTOR, OpaLayout.DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+        set.add(getScaleAnimatorY(mTop, OpaLayout.DIAMOND_DOTS_SCALE_FACTOR, OpaLayout.DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+        set.add(getDeltaAnimatorY(mBottom, mDiamondInterpolator, getPxVal(R.dimen.opa_diamond_translation), OpaLayout.DIAMOND_ANIMATION_DURATION));
+        set.add(getScaleAnimatorX(mBottom, OpaLayout.DIAMOND_DOTS_SCALE_FACTOR, OpaLayout.DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+        set.add(getScaleAnimatorY(mBottom, OpaLayout.DIAMOND_DOTS_SCALE_FACTOR, OpaLayout.DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+        set.add(getDeltaAnimatorX(mLeft, mDiamondInterpolator, -getPxVal(R.dimen.opa_diamond_translation), OpaLayout.DIAMOND_ANIMATION_DURATION));
+        set.add(getScaleAnimatorX(mLeft, OpaLayout.DIAMOND_DOTS_SCALE_FACTOR, OpaLayout.DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+        set.add(getScaleAnimatorY(mLeft, OpaLayout.DIAMOND_DOTS_SCALE_FACTOR, OpaLayout.DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+        set.add(getDeltaAnimatorX(mRight, mDiamondInterpolator, getPxVal(R.dimen.opa_diamond_translation), OpaLayout.DIAMOND_ANIMATION_DURATION));
+        set.add(getScaleAnimatorX(mRight, OpaLayout.DIAMOND_DOTS_SCALE_FACTOR, OpaLayout.DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+        set.add(getScaleAnimatorY(mRight, OpaLayout.DIAMOND_DOTS_SCALE_FACTOR, OpaLayout.DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+        set.add(getScaleAnimatorX(mWhite, OpaLayout.DIAMOND_HOME_SCALE_FACTOR, OpaLayout.DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+        set.add(getScaleAnimatorY(mWhite, OpaLayout.DIAMOND_HOME_SCALE_FACTOR, OpaLayout.DIAMOND_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+//        set.add(getScaleAnimatorX(mHalo, OpaLayout.HALO_SCALE_FACTOR, OpaLayout.MIN_DIAMOND_DURATION, mFastOutSlowInInterpolator));
+//        set.add(getScaleAnimatorY(mHalo, OpaLayout.HALO_SCALE_FACTOR, OpaLayout.MIN_DIAMOND_DURATION, mFastOutSlowInInterpolator));
+        getLongestAnim(set).addListener((Animator.AnimatorListener)new AnimatorListenerAdapter() {
             public void onAnimationCancel(final Animator animator) {
-                mCurrentAnimators.clear();
+                OpaLayout.this.mCurrentAnimators.clear();
             }
 
-            @Override
             public void onAnimationEnd(final Animator animator) {
-                startLineAnimation();
+                OpaLayout.this.startLineAnimation();
             }
         });
         return set;
@@ -291,34 +412,32 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
 
     private ArraySet<Animator> getLineAnimatorSet() {
         final ArraySet<Animator> set = new ArraySet<Animator>();
-        if (mIsLandscape) {
-            set.add(getDeltaAnimatorY(mRed, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_x_trans_ry), LINE_ANIMATION_DURATION_Y));
-            set.add(getDeltaAnimatorX(mRed, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_y_translation), LINE_ANIMATION_DURATION_X));
-            set.add(getDeltaAnimatorY(mBlue, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_x_trans_bg), LINE_ANIMATION_DURATION_Y));
-            set.add(getDeltaAnimatorY(mYellow, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_x_trans_ry), LINE_ANIMATION_DURATION_Y));
-            set.add(getDeltaAnimatorX(mYellow, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_y_translation), LINE_ANIMATION_DURATION_X));
-            set.add(getDeltaAnimatorY(mGreen, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_x_trans_bg), LINE_ANIMATION_DURATION_Y));
+        if (mVertical) {
+            set.add(getDeltaAnimatorY(mRed, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_x_trans_ry), OpaLayout.LINE_ANIMATION_DURATION_Y));
+            set.add(getDeltaAnimatorX(mRed, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_y_translation), OpaLayout.LINE_ANIMATION_DURATION_X));
+            set.add(getDeltaAnimatorY(mBlue, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_x_trans_bg), OpaLayout.LINE_ANIMATION_DURATION_Y));
+            set.add(getDeltaAnimatorY(mYellow, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_x_trans_ry), OpaLayout.LINE_ANIMATION_DURATION_Y));
+            set.add(getDeltaAnimatorX(mYellow, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_y_translation), OpaLayout.LINE_ANIMATION_DURATION_X));
+            set.add(getDeltaAnimatorY(mGreen, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_x_trans_bg), OpaLayout.LINE_ANIMATION_DURATION_Y));
         } else {
-            set.add(getDeltaAnimatorX(mRed, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_x_trans_ry), LINE_ANIMATION_DURATION_Y));
-            set.add(getDeltaAnimatorY(mRed, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_y_translation), LINE_ANIMATION_DURATION_X));
-            set.add(getDeltaAnimatorX(mBlue, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_x_trans_bg), LINE_ANIMATION_DURATION_Y));
-            set.add(getDeltaAnimatorX(mYellow, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_x_trans_ry), LINE_ANIMATION_DURATION_Y));
-            set.add(getDeltaAnimatorY(mYellow, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_y_translation), LINE_ANIMATION_DURATION_X));
-            set.add(getDeltaAnimatorX(mGreen, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_x_trans_bg), LINE_ANIMATION_DURATION_Y));
+            set.add(getDeltaAnimatorX(mRed, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_x_trans_ry), OpaLayout.LINE_ANIMATION_DURATION_Y));
+            set.add(getDeltaAnimatorY(mRed, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_y_translation), OpaLayout.LINE_ANIMATION_DURATION_X));
+            set.add(getDeltaAnimatorX(mBlue, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_x_trans_bg), OpaLayout.LINE_ANIMATION_DURATION_Y));
+            set.add(getDeltaAnimatorX(mYellow, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_x_trans_ry), OpaLayout.LINE_ANIMATION_DURATION_Y));
+            set.add(getDeltaAnimatorY(mYellow, mFastOutSlowInInterpolator, -getPxVal(R.dimen.opa_line_y_translation), OpaLayout.LINE_ANIMATION_DURATION_X));
+            set.add(getDeltaAnimatorX(mGreen, mFastOutSlowInInterpolator, getPxVal(R.dimen.opa_line_x_trans_bg), OpaLayout.LINE_ANIMATION_DURATION_Y));
         }
-        set.add(getScaleAnimatorX(mWhite, 0.0f, HOME_RESIZE_DURATION, mHomeDisappearInterpolator));
-        set.add(getScaleAnimatorY(mWhite, 0.0f, HOME_RESIZE_DURATION, mHomeDisappearInterpolator));
-        set.add(getScaleAnimatorX(mHalo, 0.0f, HOME_RESIZE_DURATION, mHomeDisappearInterpolator));
-        set.add(getScaleAnimatorY(mHalo, 0.0f, HOME_RESIZE_DURATION, mHomeDisappearInterpolator));
-        getLongestAnim(set).addListener(new AnimatorListenerAdapter() {
-            @Override
+        set.add(getScaleAnimatorX(mWhite, 0.0f, OpaLayout.HOME_RESIZE_DURATION, mHomeDisappearInterpolator));
+        set.add(getScaleAnimatorY(mWhite, 0.0f, OpaLayout.HOME_RESIZE_DURATION, mHomeDisappearInterpolator));
+//        set.add(getScaleAnimatorX(mHalo, 0.0f, OpaLayout.HOME_RESIZE_DURATION, mHomeDisappearInterpolator));
+//        set.add(getScaleAnimatorY(mHalo, 0.0f, OpaLayout.HOME_RESIZE_DURATION, mHomeDisappearInterpolator));
+        getLongestAnim(set).addListener((Animator.AnimatorListener)new AnimatorListenerAdapter() {
             public void onAnimationCancel(final Animator animator) {
-                mCurrentAnimators.clear();
+                OpaLayout.this.mCurrentAnimators.clear();
             }
 
-            @Override
             public void onAnimationEnd(final Animator animator) {
-                startCollapseAnimation();
+                OpaLayout.this.startCollapseAnimation();
             }
         });
         return set;
@@ -326,31 +445,30 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
 
     private ArraySet<Animator> getRetractAnimatorSet() {
         final ArraySet<Animator> set = new ArraySet<Animator>();
-        set.add(getTranslationAnimatorX(mRed, mRetractInterpolator, RETRACT_ANIMATION_DURATION));
-        set.add(getTranslationAnimatorY(mRed, mRetractInterpolator, RETRACT_ANIMATION_DURATION));
-        set.add(getScaleAnimatorX(mRed, 1.0f, RETRACT_ANIMATION_DURATION, mRetractInterpolator));
-        set.add(getScaleAnimatorY(mRed, 1.0f, RETRACT_ANIMATION_DURATION, mRetractInterpolator));
-        set.add(getTranslationAnimatorX(mBlue, mRetractInterpolator, RETRACT_ANIMATION_DURATION));
-        set.add(getTranslationAnimatorY(mBlue, mRetractInterpolator, RETRACT_ANIMATION_DURATION));
-        set.add(getScaleAnimatorX(mBlue, 1.0f, RETRACT_ANIMATION_DURATION, mRetractInterpolator));
-        set.add(getScaleAnimatorY(mBlue, 1.0f, RETRACT_ANIMATION_DURATION, mRetractInterpolator));
-        set.add(getTranslationAnimatorX(mGreen, mRetractInterpolator, RETRACT_ANIMATION_DURATION));
-        set.add(getTranslationAnimatorY(mGreen, mRetractInterpolator, RETRACT_ANIMATION_DURATION));
-        set.add(getScaleAnimatorX(mGreen, 1.0f, RETRACT_ANIMATION_DURATION, mRetractInterpolator));
-        set.add(getScaleAnimatorY(mGreen, 1.0f, RETRACT_ANIMATION_DURATION, mRetractInterpolator));
-        set.add(getTranslationAnimatorX(mYellow, mRetractInterpolator, RETRACT_ANIMATION_DURATION));
-        set.add(getTranslationAnimatorY(mYellow, mRetractInterpolator, RETRACT_ANIMATION_DURATION));
-        set.add(getScaleAnimatorX(mYellow, 1.0f, RETRACT_ANIMATION_DURATION, mRetractInterpolator));
-        set.add(getScaleAnimatorY(mYellow, 1.0f, RETRACT_ANIMATION_DURATION, mRetractInterpolator));
-        set.add(getScaleAnimatorX(mWhite, 1.0f, RETRACT_ANIMATION_DURATION, mRetractInterpolator));
-        set.add(getScaleAnimatorY(mWhite, 1.0f, RETRACT_ANIMATION_DURATION, mRetractInterpolator));
-        set.add(getScaleAnimatorX(mHalo, 1.0f, RETRACT_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        set.add(getScaleAnimatorY(mHalo, 1.0f, RETRACT_ANIMATION_DURATION, mFastOutSlowInInterpolator));
-        getLongestAnim(set).addListener(new AnimatorListenerAdapter() {
-            @Override
+        set.add(getTranslationAnimatorX(mRed, mRetractInterpolator, OpaLayout.RETRACT_ANIMATION_DURATION));
+        set.add(getTranslationAnimatorY(mRed, mRetractInterpolator, OpaLayout.RETRACT_ANIMATION_DURATION));
+        set.add(getScaleAnimatorX(mRed, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mRetractInterpolator));
+        set.add(getScaleAnimatorY(mRed, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mRetractInterpolator));
+        set.add(getTranslationAnimatorX(mBlue, mRetractInterpolator, OpaLayout.RETRACT_ANIMATION_DURATION));
+        set.add(getTranslationAnimatorY(mBlue, mRetractInterpolator, OpaLayout.RETRACT_ANIMATION_DURATION));
+        set.add(getScaleAnimatorX(mBlue, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mRetractInterpolator));
+        set.add(getScaleAnimatorY(mBlue, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mRetractInterpolator));
+        set.add(getTranslationAnimatorX(mGreen, mRetractInterpolator, OpaLayout.RETRACT_ANIMATION_DURATION));
+        set.add(getTranslationAnimatorY(mGreen, mRetractInterpolator, OpaLayout.RETRACT_ANIMATION_DURATION));
+        set.add(getScaleAnimatorX(mGreen, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mRetractInterpolator));
+        set.add(getScaleAnimatorY(mGreen, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mRetractInterpolator));
+        set.add(getTranslationAnimatorX(mYellow, mRetractInterpolator, OpaLayout.RETRACT_ANIMATION_DURATION));
+        set.add(getTranslationAnimatorY(mYellow, mRetractInterpolator, OpaLayout.RETRACT_ANIMATION_DURATION));
+        set.add(getScaleAnimatorX(mYellow, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mRetractInterpolator));
+        set.add(getScaleAnimatorY(mYellow, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mRetractInterpolator));
+        set.add(getScaleAnimatorX(mWhite, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mRetractInterpolator));
+        set.add(getScaleAnimatorY(mWhite, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mRetractInterpolator));
+//        set.add(getScaleAnimatorX(mHalo, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+//        set.add(getScaleAnimatorY(mHalo, 1.0f, OpaLayout.RETRACT_ANIMATION_DURATION, mFastOutSlowInInterpolator));
+        getLongestAnim(set).addListener((Animator.AnimatorListener)new AnimatorListenerAdapter() {
             public void onAnimationEnd(final Animator animator) {
-                mCurrentAnimators.clear();
-                mAnimationState = ANIMATION_STATE_NONE;
+                OpaLayout.this.mCurrentAnimators.clear();
+                OpaLayout.this.mAnimationState = OpaLayout.ANIMATION_STATE_NONE;
             }
         });
         return set;
@@ -412,7 +530,7 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
         long longestDuration = -1;
         Animator longestAnim = null;
 
-        for(int i = 0; i < animators.size(); i++) {
+        for(int i=0; i < animators.size(); i++) {
             Animator a = (Animator) animators.valueAt(i);
             if(a.getTotalDuration() > longestDuration) {
                 longestDuration = a.getTotalDuration();
@@ -426,7 +544,6 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
         mHome.abortCurrentGesture();
     }
 
-    @Override
     protected void onFinishInflate() {
         super.onFinishInflate();
 
@@ -434,22 +551,23 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
         mBlue = findViewById(R.id.blue);
         mYellow = findViewById(R.id.yellow);
         mGreen = findViewById(R.id.green);
-        mWhite = findViewById(R.id.white);
-        mHalo = findViewById(R.id.halo);
+        mWhite = (ImageView) findViewById(R.id.white);
+//        mHalo = findViewById(R.id.halo);
         mHome = (KeyButtonView) findViewById(R.id.home_button);
 
         setOpaEnabled(true);
+
+        hideAllOpa();
     }
 
-    @Override
     public boolean onInterceptTouchEvent(MotionEvent ev) {
         if (!mOpaEnabled) {
             return false;
         }
         switch (ev.getAction()) {
-            case MotionEvent.ACTION_DOWN: {
+            case 0: {
                 if (!mCurrentAnimators.isEmpty()) {
-                    if (mAnimationState != ANIMATION_STATE_RETRACT) {
+                    if (mAnimationState != OpaLayout.ANIMATION_STATE_RETRACT) {
                         return false;
                     }
                     endCurrentAnimation();
@@ -462,21 +580,24 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
                 postDelayed(mCheckLongPress, (long)ViewConfiguration.getLongPressTimeout());
                 return false;
             }
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_CANCEL: {
-                if (mAnimationState == ANIMATION_STATE_DIAMOND) {
+            case 1:
+            case 3: {
+                if (mAnimationState == OpaLayout.ANIMATION_STATE_DIAMOND) {
                     final long elapsedRealtime = SystemClock.elapsedRealtime();
+                    final long mStartTime = this.mStartTime;
                     removeCallbacks(mRetract);
                     postDelayed(mRetract, 100L - (elapsedRealtime - mStartTime));
                     removeCallbacks(mCheckLongPress);
                     return false;
                 }
-                boolean pressed = true;
+                int n;
                 if (!mIsPressed || mLongClicked) {
-                    pressed = false;
+                    n = 0;
+                } else {
+                    n = 1;
                 }
                 mIsPressed = false;
-                if (pressed) {
+                if (n != 0) {
                     mRetract.run();
                     return false;
                 }
@@ -498,9 +619,9 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
         ((ImageView) mWhite).setImageResource(resId);
     }
 
-    public void setVertical(boolean landscape) {
-        mIsLandscape = landscape;
-        if (mIsLandscape) {
+    public void setVertical(boolean vertical) {
+        mVertical = vertical;
+        if (mVertical) {
             mTop = mGreen;
             mBottom = mBlue;
             mRight = mYellow;
@@ -513,43 +634,97 @@ public class OpaLayout extends FrameLayout implements NavBarButtonProvider.Butto
         mRight = mGreen;
     }
 
-    public void setDarkIntensity(float darkIntensity) {
-        if (darkIntensity == mOldDarkIntensity) {
-            return;
-        }
-        ((ImageView) mWhite).setColorFilter(getIntensityColor(darkIntensity));
-        ((ImageView) mHalo).setColorFilter(getIntensityColor(darkIntensity));
-        mOldDarkIntensity = darkIntensity;
-    }
-
-    private int getIntensityColor(float darkIntensity) {
-        return getColorForDarkIntensity(
-                darkIntensity, mLightModeFillColor, mDarkModeFillColor);
-    }
-
-    private int getColorForDarkIntensity(float darkIntensity, int lightColor, int darkColor) {
-        return (int) ArgbEvaluator.getInstance().evaluate(darkIntensity, lightColor, darkColor);
-    }
-
-    @Override
     public void setOnLongClickListener(View.OnLongClickListener l) {
         mHome.setOnLongClickListener(l);
     }
 
-    @Override
     public void setOnTouchListener(View.OnTouchListener l) {
         mHome.setOnTouchListener(l);
     }
 
     public void setOpaEnabled(boolean enabled) {
-        final boolean eligible = SystemProperties.getBoolean("ro.opa.eligible_device", false);
-        mOpaEnabled = (enabled || UserManager.isDeviceInDemoMode(getContext())) && eligible;
+        final boolean opaToggle = Settings.System.getIntForUser(this.getContext().getContentResolver(),
+            Settings.System.PIXEL_NAV_ANIMATION, 1, UserHandle.USER_CURRENT) == 1;
+        final boolean b1 = this.getContext().getResources().getBoolean(R.bool.config_allowOpaLayout);
+        final boolean b2 = (enabled || UserManager.isDeviceInDemoMode(this.getContext())) && b1 && opaToggle;
+        this.mOpaEnabled = b2;
+        int visibility;
+        if (b2) {
+            // Don't show the OPAs right away, they'll be faded in during first animation
+//            visibility = View.VISIBLE;
+        } else {
+//            visibility = View.INVISIBLE;
+            // hide the OPAs
+            hideAllOpa();
+        }
+//        mBlue.setVisibility(visibility);
+//        mRed.setVisibility(visibility);
+//        mYellow.setVisibility(visibility);
+//        mGreen.setVisibility(visibility);
+//        mHalo.setVisibility(visibility);
+    }
 
-        int visibility = mOpaEnabled ? View.VISIBLE : View.INVISIBLE;
-        mBlue.setVisibility(visibility);
-        mRed.setVisibility(visibility);
-        mYellow.setVisibility(visibility);
-        mGreen.setVisibility(visibility);
-        mHalo.setVisibility(visibility);
+    private void hideAllOpa(){
+        fadeOutButton(mBlue);
+        fadeOutButton(mRed);
+        fadeOutButton(mYellow);
+        fadeOutButton(mGreen);
+        updateIconColor();
+    }
+
+    private void showAllOpa(){
+        fadeInButton(mBlue);
+        fadeInButton(mRed);
+        fadeInButton(mYellow);
+        fadeInButton(mGreen);
+        updateIconColor();
+    }
+
+
+    private void fadeInButton(View viewToFade){
+        ObjectAnimator animator = ObjectAnimator.ofFloat(viewToFade, View.ALPHA, 0.0f, 1.0f);
+        animator.setDuration(OpaLayout.OPA_FADE_IN_DURATION); //ms
+        animator.start();
+        animator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                viewToFade.setVisibility(View.VISIBLE);
+            }
+        });
+    }
+
+    private void fadeOutButton(View viewToFade){
+        ObjectAnimator animator = ObjectAnimator.ofFloat(viewToFade, View.ALPHA, 1.0f, 0.0f);
+        animator.setDuration(OpaLayout.OPA_FADE_OUT_DURATION); //ms
+        animator.start();
+        animator.addListener(new AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(Animator animation) {
+                viewToFade.setVisibility(View.INVISIBLE);
+            }
+        });
+    }
+
+    public void setDarkIntensity(float intensity) {
+        mIconTint = getColorForDarkIntensity(
+                intensity, mLightModeFillColor, mDarkModeFillColor);
+        updateIconColor();
+    }
+
+    private void updateIconColor() {
+        int mIconColor = mIconTint;
+        updateHomeDrawable(mIconColor);
+    }
+
+    private int getColorForDarkIntensity(float intensity, int lightColor, int darkColor) {
+        return (int) ArgbEvaluator.getInstance().evaluate(intensity, lightColor, darkColor);
+    }
+
+    private void updateHomeDrawable(int homeColor) {
+        int intHomeDrawable = R.drawable.ic_sysbar_home;
+        Drawable drawHomeIcon = getResources().getDrawable(intHomeDrawable);
+        drawHomeIcon.setColorFilter(null);
+        drawHomeIcon.setColorFilter(homeColor, PorterDuff.Mode.SRC_IN);
+        setImageDrawable(drawHomeIcon);
     }
 }
