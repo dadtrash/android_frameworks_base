@@ -21,13 +21,19 @@ import static android.app.StatusBarManager.DISABLE2_QUICK_SETTINGS;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.UserInfo;
+import android.database.ContentObserver;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
 import android.graphics.PorterDuff.Mode;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.RippleDrawable;
 import android.os.Bundle;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Handler;
+import android.os.UserHandle;
 import android.os.UserManager;
+import android.provider.Settings;
 import android.support.annotation.Nullable;
 import android.support.annotation.VisibleForTesting;
 import android.text.TextUtils;
@@ -38,6 +44,7 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import com.android.internal.logging.MetricsLogger;
@@ -45,6 +52,7 @@ import com.android.internal.logging.nano.MetricsProto;
 import com.android.keyguard.CarrierText;
 import com.android.keyguard.KeyguardUpdateMonitor;
 import com.android.settingslib.Utils;
+import com.android.settingslib.development.DevelopmentSettingsEnabler;
 import com.android.settingslib.drawable.UserIconDrawable;
 import com.android.settingslib.graph.SignalDrawable;
 import com.android.systemui.Dependency;
@@ -128,6 +136,22 @@ public class QSFooterImpl extends FrameLayout implements QSFooter,
         addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight,
                 oldBottom) -> updateAnimator(right - left));
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
+        setBuildText();
+    }
+
+
+    private void setBuildText() {
+        TextView v = findViewById(R.id.build);
+        if (v == null) return;
+        if (DevelopmentSettingsEnabler.isDevelopmentSettingsEnabled(mContext)) {
+            v.setText(mContext.getString(
+                    com.android.internal.R.string.bugreport_status,
+                    Build.VERSION.RELEASE,
+                    Build.ID));
+            v.setVisibility(View.VISIBLE);
+        } else {
+            v.setVisibility(View.GONE);
+        }
     }
 
     private void updateAnimator(int width) {
